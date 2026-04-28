@@ -1,0 +1,239 @@
+services:
+  # ─────────────────────────────────────────
+  # PostgreSQL Database
+  # ─────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: isp_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-ispdb}
+      POSTGRES_USER: ${DB_USER:-ispuser}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-isppassword}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - isp_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-ispuser} -d ${DB_NAME:-ispdb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # Redis Cache & Message Broker
+  # ─────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: isp_redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redispassword} --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - isp_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # Django Backend API (ASGI / Daphne for WebSocket support)
+  # ─────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: isp_backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+    volumes:
+      # Persist generated content only - do NOT bind-mount source code
+      # in production. Bind-mounts override the image's chown for non-root user.
+      - static_files:/app/staticfiles
+      - media_files:/app/media
+      - logs_data:/app/logs
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - isp_network
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py collectstatic --noinput &&
+             daphne -b 0.0.0.0 -p 8000 config.asgi:application"
+
+  # ─────────────────────────────────────────
+  # Celery Worker (Background Tasks)
+  # ─────────────────────────────────────────
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: isp_celery_worker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+    volumes:
+      - media_files:/app/media
+      - logs_data:/app/logs
+    depends_on:
+      - backend
+      - redis
+    networks:
+      - isp_network
+    command: celery -A config worker --loglevel=info --concurrency=4 -Q celery,billing,notifications,network
+
+  # ─────────────────────────────────────────
+  # Celery Beat (Scheduled Tasks)
+  # ─────────────────────────────────────────
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: isp_celery_beat
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+    volumes:
+      - celery_beat_data:/app/celerybeat
+      - logs_data:/app/logs
+    depends_on:
+      - backend
+      - redis
+    networks:
+      - isp_network
+    command: celery -A config beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+
+  # ─────────────────────────────────────────
+  # React Frontend (build → shared volume served by Nginx)
+  # ─────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: isp_frontend
+    restart: unless-stopped
+    volumes:
+      - frontend_build:/app/dist
+    networks:
+      - isp_network
+
+  # ─────────────────────────────────────────
+  # Nginx Reverse Proxy
+  # ─────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: isp_nginx
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - static_files:/var/www/static:ro
+      - media_files:/var/www/media:ro
+      - frontend_build:/var/www/frontend:ro
+      # SSL certificates (optional). If you don't have certs yet, set
+      # NGINX_CONFIG=nginx-http.conf in .env to use the HTTP-only profile.
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - isp_network
+
+  # ─────────────────────────────────────────
+  # FreeRADIUS Server
+  # Note: only overlay specific config files - never bind-mount the entire
+  # /etc/raddb directory or you will wipe FreeRADIUS's default modules.
+  # ─────────────────────────────────────────
+  freeradius:
+    build:
+      context: ./radius
+      dockerfile: Dockerfile
+    container_name: isp_radius
+    restart: unless-stopped
+    ports:
+      - "1812:1812/udp"
+      - "1813:1813/udp"
+    env_file: .env
+    volumes:
+      - ./radius/config/clients.conf:/etc/raddb/clients.conf:ro
+      - ./radius/config/mods-config:/etc/raddb/mods-config:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - isp_network
+
+  # ─────────────────────────────────────────
+  # Flower - Celery Monitoring
+  # ─────────────────────────────────────────
+  flower:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: isp_flower
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "5555:5555"
+    depends_on:
+      - celery_worker
+    networks:
+      - isp_network
+    command: celery -A config flower --port=5555 --basic_auth=${FLOWER_USER:-admin}:${FLOWER_PASSWORD:-admin}
+
+  # ─────────────────────────────────────────
+  # pgAdmin - Database Management UI (optional, run with: --profile tools)
+  # ─────────────────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: isp_pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@isp.local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-adminpassword}
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - db
+    networks:
+      - isp_network
+    profiles:
+      - tools
+
+# ─────────────────────────────────────────
+# Networks
+# ─────────────────────────────────────────
+networks:
+  isp_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# ─────────────────────────────────────────
+# Volumes
+# ─────────────────────────────────────────
+volumes:
+  postgres_data:
+  redis_data:
+  static_files:
+  media_files:
+  frontend_build:
+  celery_beat_data:
+  pgadmin_data:
+  logs_data:
