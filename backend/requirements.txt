@@ -1,6 +1,6 @@
 # =============================================================================
 # ISP Management Software - Python Dependencies (Fixed v1.0.3)
-# Complete list - no missing modules
+# All packages verified against INSTALLED_APPS and imports
 # =============================================================================
 
 # ── Django Core ───────────────────────────────────────────────────────────────
@@ -24,8 +24,11 @@ channels-redis==4.2.0
 # ── Database ──────────────────────────────────────────────────────────────────
 psycopg2-binary==2.9.9
 
-# ── Cache / Celery ────────────────────────────────────────────────────────────
+# ── Cache / Redis ─────────────────────────────────────────────────────────────
 redis==5.0.7
+django-redis==5.4.0
+
+# ── Celery ────────────────────────────────────────────────────────────────────
 celery==5.3.6
 kombu==5.3.4
 django-celery-beat==2.6.0
@@ -37,6 +40,11 @@ django-allauth==0.63.6
 pyotp==2.9.0
 cryptography==42.0.8
 django-otp==1.5.0
+
+# ── Monitoring / Prometheus ───────────────────────────────────────────────────
+django-prometheus==2.3.1
+django-health-check==3.18.3
+sentry-sdk==2.11.0
 
 # ── Storage / Files ───────────────────────────────────────────────────────────
 Pillow==10.4.0
@@ -66,10 +74,6 @@ tablib==3.5.0
 pyrad==2.4
 netaddr==1.3.0
 paramiko==3.4.0
-
-# ── Monitoring ────────────────────────────────────────────────────────────────
-django-health-check==3.18.3
-sentry-sdk==2.11.0
 
 # ── Admin / UI ────────────────────────────────────────────────────────────────
 django-crispy-forms==2.3
