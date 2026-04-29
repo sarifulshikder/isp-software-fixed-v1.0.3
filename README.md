@@ -1,20 +1,120 @@
 # 📡 ISP Billing & Management Software
 
-একটি সম্পূর্ণ আধুনিক ISP ব্যবস্থাপনা সফটওয়্যার — Alpine Linux-ভিত্তিক Docker Containers-এ।
+> **v1.0.3 Fixed** — সম্পূর্ণ bug-free, production-ready। Clone করার পর শুধু একটি command এ deploy হবে।
 
-> **v1.0.1** — সম্পূর্ণ কোড রিভিউ ও বাগ-ফিক্স প্রয়োগ করা হয়েছে। সব পরিবর্তনের তালিকা আছে [`CHANGELOG_FIXES.md`](./CHANGELOG_FIXES.md)-এ।
+বাংলাদেশ ও বিশ্বের ISP দের জন্য তৈরি আধুনিক billing ও network management software। Alpine Linux-based Docker containers এ চলে।
 
-## ⚡ Quick Start (One-shot deploy)
+---
+
+## ⚡ Quick Start (One Command Deploy)
 
 ```bash
+git clone https://github.com/sarifulshikder/isp-software-fixed-v1.0.3.git
+cd isp-software-fixed-v1.0.3
 chmod +x deploy.sh
-./deploy.sh           # interactive: domain, passwords ইত্যাদির prompt দেবে
-./deploy.sh -y        # non-interactive: সব secret auto-generate করবে
+./deploy.sh -y
 ```
 
-স্ক্রিপ্ট যা করে: docker prerequisites চেক → `.env` জেনারেট (strong random secrets) → self-signed SSL cert বানায় → `docker compose build && up -d` → migrations + collectstatic → Django superuser তৈরি (interactive)।
+`-y` flag দিলে সব password ও secret **auto-generate** হবে। Deploy শেষে terminal এ login credentials দেখাবে।
 
-দৈনন্দিন কন্ট্রোলের জন্য `./isp.sh start|stop|restart|logs|status|backup|update|shell` ব্যবহার করুন।
+---
+
+## ✅ Fixed Bugs (v1.0.3)
+
+| # | সমস্যা | সমাধান |
+|---|---|---|
+| 1 | `sed` command error in `deploy.sh` | `cat > .env` দিয়ে replace করা হয়েছে |
+| 2 | `kombu==5.3.3` vs `celery==5.3.6` conflict | `kombu==5.3.4` করা হয়েছে |
+| 3 | Docker permission denied (`docker.sock`) | Auto `usermod -aG docker` যোগ করা হয়েছে |
+| 4 | Superuser create হয় না | Python shell দিয়ে auto-create করা হয়েছে |
+| 5 | SSL certificate না থাকায় nginx crash | Auto `openssl` দিয়ে self-signed cert generate হয় |
+| 6 | `init_db.sql` role error (`ispuser` does not exist) | `DO $$ IF NOT EXISTS` দিয়ে fix করা হয়েছে |
+| 7 | Migration order error | Proper healthcheck wait + `--noinput` যোগ করা হয়েছে |
+
+---
+
+## 🛠️ Prerequisites
+
+| Tool | Minimum Version | Install |
+|---|---|---|
+| Docker Engine | 24+ | `curl -fsSL https://get.docker.com \| sh` |
+| Docker Compose | v2.x | `sudo apt install docker-compose-plugin -y` |
+| RAM | 4 GB | — |
+| Disk | 20 GB | — |
+| OS | Ubuntu 22.04+ / Debian 12+ | — |
+
+---
+
+## 🚀 Installation Guide
+
+### Step 1 — Clone করো
+
+```bash
+git clone https://github.com/sarifulshikder/isp-software-fixed-v1.0.3.git
+cd isp-software-fixed-v1.0.3
+```
+
+### Step 2 — Deploy করো
+
+**Option A — Auto (সব auto-generate):**
+```bash
+chmod +x deploy.sh
+./deploy.sh -y
+```
+
+**Option B — Interactive (নিজে সব দেবে):**
+```bash
+chmod +x deploy.sh
+./deploy.sh
+```
+Company name, domain, email, passwords জিজ্ঞেস করবে।
+
+### Step 3 — Browser এ Access করো
+
+| সার্ভিস | URL |
+|---|---|
+| 🌐 Web App | `http://YOUR_SERVER_IP` |
+| 🔒 HTTPS | `https://YOUR_SERVER_IP` |
+| 📖 API Docs | `http://YOUR_SERVER_IP/api/docs/` |
+| ⚙️ Django Admin | `http://YOUR_SERVER_IP/admin/` |
+| 📊 Celery Monitor | `http://YOUR_SERVER_IP:5555` |
+
+> **Note:** HTTPS এ browser warning আসবে (self-signed cert)। **Advanced → Proceed** চাপো।
+
+---
+
+## 🔧 Management Commands
+
+```bash
+./isp.sh start              # সব service চালু করো
+./isp.sh stop               # সব service বন্ধ করো
+./isp.sh restart            # সব service restart করো
+./isp.sh status             # সব container এর status দেখো
+./isp.sh logs               # সব logs দেখো
+./isp.sh logs backend       # শুধু backend logs
+./isp.sh logs nginx         # শুধু nginx logs
+./isp.sh backup             # Database backup নাও
+./isp.sh restore backup.sql # Database restore করো
+./isp.sh shell backend      # Backend container এ shell খোলো
+./isp.sh django migrate     # Django migration run করো
+./isp.sh createsuperuser    # নতুন admin user তৈরি করো
+./isp.sh update             # Latest code pull করে restart করো
+```
+
+---
+
+## 🔄 Existing Installation এ Fixes Apply করতে
+
+পুরনো installation এ সব fix apply করতে:
+
+```bash
+cd ~/isp-software-fixed-v1.0.3
+git pull
+chmod +x apply_fixes.sh
+./apply_fixes.sh
+docker compose down -v
+./deploy.sh -y
+```
 
 ---
 
@@ -22,20 +122,20 @@ chmod +x deploy.sh
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                   Nginx (Alpine)                     │
-│              Port 80 / 443 (HTTPS)                  │
+│              Nginx (Alpine) — Port 80/443           │
+│           HTTP → HTTPS redirect + SSL               │
 └────────────┬──────────────────┬────────────────────┘
              │                  │
     ┌────────▼──────┐  ┌────────▼──────┐
     │ React Frontend│  │ Django Backend │
-    │  (Port 3000)  │  │  (Port 8000)  │
+    │  (Vite build) │  │  (Daphne ASGI)│
     └───────────────┘  └───────┬───────┘
                                │
            ┌───────────────────┼───────────────────┐
            │                   │                   │
   ┌────────▼──────┐  ┌────────▼──────┐  ┌────────▼──────┐
   │  PostgreSQL   │  │     Redis     │  │  FreeRADIUS   │
-  │  (Port 5432)  │  │  (Port 6379)  │  │(1812/1813 UDP)│
+  │     v16       │  │      v7       │  │  1812/1813UDP │
   └───────────────┘  └───────────────┘  └───────────────┘
            │
   ┌────────▼──────────────────────────────┐
@@ -46,10 +146,10 @@ chmod +x deploy.sh
 
 ---
 
-## ✅ Features
+## ✨ Features
 
 | Module | Features |
-|--------|----------|
+|---|---|
 | 👥 Customer | Profile, KYC, PPPoE, IP assignment, notes, status |
 | 📋 Billing | Auto invoicing, pro-rata, late fees, VAT, credit notes |
 | 💳 Payment | Cash, bKash, Nagad, Rocket, Bank, Card, auto-pay |
@@ -65,62 +165,39 @@ chmod +x deploy.sh
 
 ---
 
-## 🚀 Quick Start
+## 🔐 Default Ports
 
-### Prerequisites
-- Docker Engine 24+
-- Docker Compose 2.x
-- 4GB RAM minimum
-- 20GB disk space
-
-### Installation
-
-```bash
-# 1. Clone the project
-git clone https://github.com/your-org/isp-software.git
-cd isp-software
-
-# 2. Setup environment
-cp .env.example .env
-nano .env   # Edit your settings
-
-# 3. Start everything with one command
-chmod +x isp.sh
-./isp.sh start
-
-# 4. Create admin user
-./isp.sh createsuperuser
-
-# 5. Access the application
-# Web App:   http://localhost
-# API Docs:  http://localhost/api/docs/
-# Admin:     http://localhost/admin/
-```
+| Service | Port | Protocol |
+|---|---|---|
+| Web HTTP | 80 | TCP |
+| Web HTTPS | 443 | TCP |
+| RADIUS Auth | 1812 | UDP |
+| RADIUS Acct | 1813 | UDP |
+| Flower (Celery) | 5555 | TCP |
+| pgAdmin | 5050 | TCP |
 
 ---
 
-## 🔧 Management Commands
+## 🛠️ Tech Stack
 
-```bash
-./isp.sh start              # Start all services
-./isp.sh stop               # Stop all services
-./isp.sh restart            # Restart all services
-./isp.sh status             # Check service status
-./isp.sh logs               # View all logs
-./isp.sh logs backend       # View backend logs only
-./isp.sh backup             # Backup database
-./isp.sh restore backup.sql # Restore database
-./isp.sh shell backend      # Open Django shell
-./isp.sh django migrate     # Run Django migrations
-./isp.sh update             # Update to latest version
-```
+| Layer | Technology |
+|---|---|
+| Base OS | Alpine Linux 3.19 |
+| Backend | Python 3.12 + Django 5 + DRF |
+| Frontend | React 18 + Vite + Recharts |
+| Database | PostgreSQL 16 |
+| Cache/Queue | Redis 7 + Celery 5.3.6 |
+| Web Server | Nginx Alpine |
+| RADIUS | FreeRADIUS |
+| Auth | JWT (SimpleJWT) + 2FA |
+| Container | Docker + Docker Compose v2 |
 
 ---
 
 ## 📁 Project Structure
 
 ```
-isp-software/
+isp-software-fixed-v1.0.3/
 ├── backend/                  # Django REST API
 │   ├── apps/
 │   │   ├── accounts/         # User auth & roles
@@ -136,30 +213,26 @@ isp-software/
 │   │   ├── hr/               # Human resources
 │   │   └── notifications/    # SMS/Email/Push
 │   ├── config/               # Django settings
-│   ├── utils/                # Utilities & helpers
-│   ├── Dockerfile            # Alpine-based image
-│   └── requirements.txt      # Python dependencies
+│   ├── requirements.txt      # Python deps (fixed)
+│   └── Dockerfile
 │
 ├── frontend/                 # React + Vite app
 │   ├── src/
-│   │   ├── pages/            # All page components
-│   │   ├── components/       # Shared UI components
-│   │   ├── services/         # API service layer
-│   │   ├── store/            # Zustand state management
-│   │   └── main.jsx          # App entry point
-│   ├── Dockerfile            # Alpine-based build
-│   └── package.json
+│   └── Dockerfile
 │
-├── nginx/                    # Nginx reverse proxy
-│   └── nginx.conf
-├── radius/                   # FreeRADIUS server
-│   ├── Dockerfile
-│   └── config/
+├── nginx/
+│   ├── nginx.conf            # Nginx config
+│   └── ssl/                  # SSL certs (auto-generated)
+│
+├── radius/                   # FreeRADIUS
 ├── docker/
-│   └── scripts/init_db.sql   # Database init
-├── docker-compose.yml        # Full stack definition
-├── .env.example              # Environment template
-├── isp.sh                    # Management script
+│   └── scripts/
+│       └── init_db.sql       # DB init (fixed)
+├── docker-compose.yml
+├── .env.example
+├── deploy.sh                 # ✅ Fixed deploy script
+├── isp.sh                    # ✅ Fixed management script
+├── apply_fixes.sh            # 🔧 Apply fixes to existing install
 └── README.md
 ```
 
@@ -168,7 +241,7 @@ isp-software/
 ## 🌐 API Endpoints
 
 | Method | Endpoint | Description |
-|--------|----------|-------------|
+|---|---|---|
 | POST | `/api/v1/auth/login/` | Login & get JWT |
 | GET | `/api/v1/customers/` | List customers |
 | POST | `/api/v1/customers/` | Add customer |
@@ -181,39 +254,57 @@ isp-software/
 
 ---
 
-## 🔐 Default Ports
+## ❓ Troubleshooting
 
-| Service | Port |
-|---------|------|
-| Web (HTTP) | 80 |
-| Web (HTTPS) | 443 |
-| RADIUS Auth | 1812/udp |
-| RADIUS Acct | 1813/udp |
-| Flower (Celery Monitor) | 5555 |
-| pgAdmin | 5050 |
+**Docker permission denied:**
+```bash
+sudo usermod -aG docker $USER
+newgrp docker
+```
 
----
+**Port 80 already in use:**
+```bash
+sudo lsof -i :80
+sudo systemctl stop apache2  # অথবা nginx
+```
 
-## 🛠️ Tech Stack
+**Database not healthy:**
+```bash
+docker compose down -v
+docker compose up -d
+```
 
-| Layer | Technology |
-|-------|-----------|
-| Base OS | **Alpine Linux 3.19** |
-| Backend | **Python 3.12 + Django 5 + DRF** |
-| Frontend | **React 18 + Vite + Recharts** |
-| Database | **PostgreSQL 16** |
-| Cache/Queue | **Redis 7 + Celery** |
-| Web Server | **Nginx Alpine** |
-| RADIUS | **FreeRADIUS** |
-| Auth | **JWT (SimpleJWT)** |
-| Container | **Docker + Docker Compose** |
+**Nginx keeps restarting (SSL error):**
+```bash
+mkdir -p nginx/ssl
+openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+  -keyout nginx/ssl/privkey.pem \
+  -out nginx/ssl/fullchain.pem \
+  -subj "/C=BD/ST=Dhaka/L=Dhaka/O=ISP/CN=localhost"
+docker compose restart nginx
+```
+
+**Superuser login কাজ করছে না:**
+```bash
+cd ~/isp-software-fixed-v1.0.3
+docker compose exec backend python manage.py shell -c "
+from django.contrib.auth import get_user_model
+User = get_user_model()
+u = User.objects.get(username='admin')
+u.set_password('Admin1234!')
+u.save()
+print('Done')
+"
+```
 
 ---
 
 ## 📞 Support
 
-For issues and customization, please open a GitHub issue or contact the development team.
+সমস্যা হলে GitHub Issues খুলুন অথবা যোগাযোগ করুন।
 
 ---
 
 *Built with ❤️ for ISPs in Bangladesh and beyond*
+
+> **v1.0.3** — All deployment bugs fixed. See [`CHANGELOG_FIXES.md`](CHANGELOG_FIXES.md) for details.
