@@ -2,11 +2,27 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
-from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
+from django.http import JsonResponse
+from drf_spectacular.views import (
+    SpectacularAPIView,
+    SpectacularSwaggerView,
+    SpectacularRedocView
+)
 
 API_V1 = 'api/v1/'
 
+
+def home(request):
+    return JsonResponse({
+        "status": "ok",
+        "message": "ISP Backend Running"
+    })
+
+
 urlpatterns = [
+    # Home
+    path('', home, name='home'),
+
     # Admin
     path('admin/', admin.site.urls),
 
@@ -19,20 +35,20 @@ urlpatterns = [
     path('api/health/', include('utils.health_urls')),
 
     # Prometheus Metrics
-    path('', include('django_prometheus.urls')),
+    path('metrics/', include('django_prometheus.urls')),
 
     # API v1 Routes
-    path(API_V1 + 'auth/',          include('apps.accounts.urls')),
-    path(API_V1 + 'customers/',     include('apps.customers.urls')),
-    path(API_V1 + 'billing/',       include('apps.billing.urls')),
-    path(API_V1 + 'payments/',      include('apps.payments.urls')),
-    path(API_V1 + 'packages/',      include('apps.packages.urls')),
-    path(API_V1 + 'network/',       include('apps.network.urls')),
-    path(API_V1 + 'support/',       include('apps.support.urls')),
-    path(API_V1 + 'inventory/',     include('apps.inventory.urls')),
-    path(API_V1 + 'reseller/',      include('apps.reseller.urls')),
-    path(API_V1 + 'reports/',       include('apps.reports.urls')),
-    path(API_V1 + 'hr/',            include('apps.hr.urls')),
+    path(API_V1 + 'auth/', include('apps.accounts.urls')),
+    path(API_V1 + 'customers/', include('apps.customers.urls')),
+    path(API_V1 + 'billing/', include('apps.billing.urls')),
+    path(API_V1 + 'payments/', include('apps.payments.urls')),
+    path(API_V1 + 'packages/', include('apps.packages.urls')),
+    path(API_V1 + 'network/', include('apps.network.urls')),
+    path(API_V1 + 'support/', include('apps.support.urls')),
+    path(API_V1 + 'inventory/', include('apps.inventory.urls')),
+    path(API_V1 + 'reseller/', include('apps.reseller.urls')),
+    path(API_V1 + 'reports/', include('apps.reports.urls')),
+    path(API_V1 + 'hr/', include('apps.hr.urls')),
     path(API_V1 + 'notifications/', include('apps.notifications.urls')),
 ]
 
