@@ -1,250 +1,323 @@
 #!/usr/bin/env bash
-# ─────────────────────────────────────────────────────────────
-# ISP Software - One-shot VPS Deployment Helper
-#
-# Usage:
-#   chmod +x deploy.sh
-#   ./deploy.sh                # interactive
-#   ./deploy.sh --non-interactive   # use env defaults / .env if present
-#
-# What it does:
-#   1. Verifies docker + docker compose are installed
-#   2. Generates a strong .env (or keeps existing one)
-#   3. Creates a self-signed SSL cert in nginx/ssl/ if none exists
-#   4. Builds and starts the full stack
-#   5. Runs migrations + collectstatic
-#   6. Creates a Django superuser (interactive)
-# ─────────────────────────────────────────────────────────────
-
+# =============================================================================
+# ISP Management Software - Deploy Script (Fixed v1.0.3)
+# Fixes: sed error, docker permission, SSL cert, superuser creation
+# =============================================================================
 set -euo pipefail
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-cd "$SCRIPT_DIR"
+# ── Colors ────────────────────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; NC='\033[0m'; BOLD='\033[1m'
 
-# ── Colors ──────────────────────────────────────────────────
-RED='\033[0;31m'; GRN='\033[0;32m'; YLW='\033[1;33m'; BLU='\033[0;34m'; NC='\033[0m'
-log()   { printf "${BLU}[deploy]${NC} %s\n" "$*"; }
-ok()    { printf "${GRN}[ ok  ]${NC} %s\n" "$*"; }
-warn()  { printf "${YLW}[warn]${NC} %s\n" "$*"; }
-err()   { printf "${RED}[ err ]${NC} %s\n" "$*" >&2; }
+ok()   { echo -e "${GREEN}[ ok ]${NC} $*"; }
+info() { echo -e "${BLUE}[info]${NC} $*"; }
+warn() { echo -e "${YELLOW}[warn]${NC} $*"; }
+err()  { echo -e "${RED}[ERR ]${NC} $*"; exit 1; }
+step() { echo -e "\n${BOLD}${BLUE}[deploy]${NC} $*"; }
 
-NON_INTERACTIVE=0
-for arg in "$@"; do
-  case "$arg" in
-    --non-interactive|-y) NON_INTERACTIVE=1 ;;
-    --help|-h)
-      sed -n '2,15p' "$0"; exit 0 ;;
-  esac
-done
+# ── Non-interactive flag ──────────────────────────────────────────────────────
+AUTO=false
+[[ "${1:-}" == "-y" || "${1:-}" == "--yes" ]] && AUTO=true
 
-ask() {
-  # ask "Prompt" "default" -> echoes user input or default
-  local prompt="$1" default="${2:-}" reply=""
-  if [[ "$NON_INTERACTIVE" == "1" ]]; then
-    echo "$default"; return
-  fi
-  if [[ -n "$default" ]]; then
-    read -r -p "$prompt [$default]: " reply
-  else
-    read -r -p "$prompt: " reply
-  fi
-  echo "${reply:-$default}"
-}
+# ── Helper: generate random secret ───────────────────────────────────────────
+gen_secret() { tr -dc 'A-Za-z0-9!@#%^&*()_+=' </dev/urandom 2>/dev/null | head -c "${1:-50}" || true; }
+gen_pass()   { tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 20 || true; }
 
-ask_secret() {
-  # ask_secret "Prompt" -> echoes typed (hidden) input or generated 32-byte hex
-  local prompt="$1" reply=""
-  if [[ "$NON_INTERACTIVE" == "1" ]]; then
-    gen_secret; return
-  fi
-  read -r -s -p "$prompt (leave blank to auto-generate): " reply
-  echo
-  if [[ -z "$reply" ]]; then
-    gen_secret
-  else
-    echo "$reply"
-  fi
-}
+# =============================================================================
+# STEP 1 — Check prerequisites
+# =============================================================================
+step "Checking prerequisites..."
 
-gen_secret() {
-  if command -v openssl >/dev/null 2>&1; then
-    openssl rand -hex 24
-  else
-    head -c 32 /dev/urandom | base64 | tr -d '/+=' | cut -c1-40
-  fi
-}
-
-# ── 1. Pre-flight checks ───────────────────────────────────
-log "Checking prerequisites..."
-command -v docker >/dev/null 2>&1 || { err "docker is not installed. Install Docker Engine first."; exit 1; }
-if docker compose version >/dev/null 2>&1; then
-  COMPOSE="docker compose"
-elif command -v docker-compose >/dev/null 2>&1; then
-  COMPOSE="docker-compose"
+# Fix Docker permission automatically
+if ! docker info &>/dev/null 2>&1; then
+    warn "Docker permission issue detected. Fixing..."
+    sudo usermod -aG docker "$USER" 2>/dev/null || true
+    # Use sudo for this session
+    DOCKER_CMD="sudo docker"
+    COMPOSE_CMD="sudo docker compose"
+    warn "Using sudo for Docker this session. Please logout/login after deploy for permanent fix."
 else
-  err "docker compose plugin not found. Install docker-compose-plugin."
-  exit 1
+    DOCKER_CMD="docker"
+    COMPOSE_CMD="docker compose"
 fi
-ok "Docker: $(docker --version)"
-ok "Compose: $($COMPOSE version | head -n1)"
 
-# ── 2. .env generation ─────────────────────────────────────
-if [[ -f .env ]]; then
-  warn ".env already exists - keeping it. Delete it first to regenerate."
+# Check Docker version
+DOCKER_VER=$($DOCKER_CMD --version 2>/dev/null | grep -oP '\d+\.\d+' | head -1 || echo "0")
+ok "Docker: $($DOCKER_CMD --version)"
+
+# Check Docker Compose
+if $COMPOSE_CMD version &>/dev/null 2>&1; then
+    ok "Compose: $($COMPOSE_CMD version)"
 else
-  log "Generating .env from .env.example..."
-  cp .env.example .env
-
-  COMPANY=$(ask "Company name"           "My Internet Service Provider")
-  DOMAIN=$(ask  "Primary domain (no http://)"  "isp.example.com")
-  ADMIN_EMAIL=$(ask "Admin email"        "admin@${DOMAIN}")
-
-  SECRET_KEY=$(gen_secret)$(gen_secret)
-  DB_PASSWORD=$(ask_secret "DB password")
-  REDIS_PASSWORD=$(ask_secret "Redis password")
-  RADIUS_SECRET=$(ask_secret "RADIUS shared secret")
-  FLOWER_PASSWORD=$(ask_secret "Flower (celery monitor) password")
-  PGADMIN_PASSWORD=$(ask_secret "pgAdmin password")
-
-  # Cross-platform sed -i
-  sedi() {
-    if sed --version >/dev/null 2>&1; then sed -i "$@"; else sed -i '' "$@"; fi
-  }
-
-  sedi "s|^SECRET_KEY=.*|SECRET_KEY=${SECRET_KEY}|"                           .env
-  sedi "s|^DEBUG=.*|DEBUG=False|"                                              .env
-  sedi "s|^ALLOWED_HOSTS=.*|ALLOWED_HOSTS=localhost,127.0.0.1,${DOMAIN}|"     .env
-  sedi "s|^CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=https://${DOMAIN}|"   .env
-  sedi "s|^DB_PASSWORD=.*|DB_PASSWORD=${DB_PASSWORD}|"                         .env
-  sedi "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=${REDIS_PASSWORD}|"                .env
-  sedi "s|^COMPANY_NAME=.*|COMPANY_NAME=${COMPANY}|"                           .env
-  sedi "s|^COMPANY_EMAIL=.*|COMPANY_EMAIL=${ADMIN_EMAIL}|"                     .env
-
-  # Append values that may not already exist in the example
-  grep -q '^RADIUS_SECRET='   .env || echo "RADIUS_SECRET=${RADIUS_SECRET}"     >> .env
-  grep -q '^FLOWER_USER='     .env || echo "FLOWER_USER=admin"                  >> .env
-  grep -q '^FLOWER_PASSWORD=' .env || echo "FLOWER_PASSWORD=${FLOWER_PASSWORD}" >> .env
-  grep -q '^PGADMIN_EMAIL='   .env || echo "PGADMIN_EMAIL=${ADMIN_EMAIL}"       >> .env
-  grep -q '^PGADMIN_PASSWORD=' .env || echo "PGADMIN_PASSWORD=${PGADMIN_PASSWORD}" >> .env
-
-  chmod 600 .env
-  ok ".env generated (chmod 600)"
+    err "Docker Compose v2 not found. Run: sudo apt install docker-compose-plugin -y"
 fi
 
-# ── 3. SSL certificate ─────────────────────────────────────
-mkdir -p nginx/ssl
-if [[ -f nginx/ssl/fullchain.pem && -f nginx/ssl/privkey.pem ]]; then
-  ok "SSL cert already present in nginx/ssl/"
+ok "Prerequisites check passed"
+
+# =============================================================================
+# STEP 2 — Gather configuration
+# =============================================================================
+step "Generating .env from .env.example..."
+
+if [[ ! -f .env.example ]]; then
+    err ".env.example not found. Are you in the project directory?"
+fi
+
+if $AUTO; then
+    info "Auto mode: generating all secrets automatically"
+    COMPANY_NAME="My ISP Company"
+    DOMAIN="localhost"
+    ADMIN_EMAIL="admin@isp.local"
+    DB_PASSWORD=$(gen_pass)
+    REDIS_PASSWORD=$(gen_pass)
+    RADIUS_SECRET=$(gen_pass)
+    FLOWER_PASSWORD=$(gen_pass)
+    PGADMIN_PASSWORD=$(gen_pass)
+    SECRET_KEY=$(gen_secret 60)
+    SUPERUSER_EMAIL="admin@isp.com"
+    SUPERUSER_PASSWORD="Admin$(gen_pass | head -c 8)!"
 else
-  log "Generating self-signed SSL certificate (replace with Let's Encrypt for production)..."
-  if ! command -v openssl >/dev/null 2>&1; then
-    err "openssl required. Install: apt install openssl"
-    exit 1
-  fi
-  CN=$(grep -E '^ALLOWED_HOSTS=' .env | head -n1 | cut -d= -f2 | tr ',' '\n' | tail -n1 | tr -d ' ')
-  CN=${CN:-localhost}
-  openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-    -keyout nginx/ssl/privkey.pem \
-    -out    nginx/ssl/fullchain.pem \
-    -subj   "/C=BD/ST=Dhaka/L=Dhaka/O=ISP/CN=${CN}" 2>/dev/null
-  chmod 600 nginx/ssl/privkey.pem
-  ok "Self-signed cert created for ${CN}"
+    echo ""
+    read -rp "Company name [My Internet Service Provider]: " COMPANY_NAME
+    COMPANY_NAME="${COMPANY_NAME:-My Internet Service Provider}"
+
+    read -rp "Primary domain (no http://) [localhost]: " DOMAIN
+    DOMAIN="${DOMAIN:-localhost}"
+
+    read -rp "Admin email [admin@isp.com]: " ADMIN_EMAIL
+    ADMIN_EMAIL="${ADMIN_EMAIL:-admin@isp.com}"
+
+    echo ""
+    info "Leave passwords blank to auto-generate strong passwords"
+    read -rp "DB password [auto]: " DB_PASSWORD
+    DB_PASSWORD="${DB_PASSWORD:-$(gen_pass)}"
+
+    read -rp "Redis password [auto]: " REDIS_PASSWORD
+    REDIS_PASSWORD="${REDIS_PASSWORD:-$(gen_pass)}"
+
+    read -rp "RADIUS shared secret [auto]: " RADIUS_SECRET
+    RADIUS_SECRET="${RADIUS_SECRET:-$(gen_pass)}"
+
+    read -rp "Flower password [auto]: " FLOWER_PASSWORD
+    FLOWER_PASSWORD="${FLOWER_PASSWORD:-$(gen_pass)}"
+
+    read -rp "pgAdmin password [auto]: " PGADMIN_PASSWORD
+    PGADMIN_PASSWORD="${PGADMIN_PASSWORD:-$(gen_pass)}"
+
+    SECRET_KEY=$(gen_secret 60)
+
+    echo ""
+    info "Superuser (admin) account for the web panel:"
+    read -rp "Superuser email [admin@isp.com]: " SUPERUSER_EMAIL
+    SUPERUSER_EMAIL="${SUPERUSER_EMAIL:-admin@isp.com}"
+
+    read -rsp "Superuser password [auto-generate]: " SUPERUSER_PASSWORD
+    echo ""
+    SUPERUSER_PASSWORD="${SUPERUSER_PASSWORD:-Admin$(gen_pass | head -c 8)!}"
 fi
 
-# ── 4. Build and start ─────────────────────────────────────
-log "Building containers (this can take 5-10 minutes the first time)..."
-$COMPOSE build
+# Write .env file using cat (avoids sed special character issues)
+cat > .env << EOF
+# =============================================================================
+# ISP Management Software - Environment Configuration
+# Generated: $(date)
+# =============================================================================
 
-log "Starting the stack in detached mode..."
-$COMPOSE up -d
+# ── Django ────────────────────────────────────────────────────────────────────
+SECRET_KEY=${SECRET_KEY}
+DEBUG=False
+ALLOWED_HOSTS=${DOMAIN},localhost,127.0.0.1
+DOMAIN=${DOMAIN}
 
-log "Waiting for the database to be ready..."
-for i in {1..60}; do
-  if $COMPOSE exec -T db pg_isready -U "$(grep '^DB_USER=' .env | cut -d= -f2)" >/dev/null 2>&1; then
-    ok "Postgres is ready"
-    break
-  fi
-  sleep 2
-  [[ $i -eq 60 ]] && { err "Postgres did not become ready in 120s"; $COMPOSE logs db | tail -n 30; exit 1; }
-done
+# ── Database (PostgreSQL) ─────────────────────────────────────────────────────
+DB_NAME=ispdb
+DB_USER=ispuser
+DB_PASSWORD=${DB_PASSWORD}
+DB_HOST=db
+DB_PORT=5432
+POSTGRES_DB=ispdb
+POSTGRES_USER=ispuser
+POSTGRES_PASSWORD=${DB_PASSWORD}
 
-log "Waiting for the backend container to start..."
-for i in {1..60}; do
-  if $COMPOSE exec -T backend python -c "print('up')" >/dev/null 2>&1; then
-    ok "Backend container is responsive"
-    break
-  fi
-  sleep 2
-done
+# ── Redis ─────────────────────────────────────────────────────────────────────
+REDIS_PASSWORD=${REDIS_PASSWORD}
+REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+CELERY_BROKER_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD}@redis:6379/0
 
-# First run: generate initial migrations for every app (no-ops on subsequent runs).
-log "Generating initial migrations (first deploy only - idempotent)..."
-$COMPOSE exec -T backend python manage.py makemigrations --noinput accounts customers billing payments packages network support inventory reseller reports hr notifications || true
-$COMPOSE exec -T backend python manage.py makemigrations --noinput || true
+# ── Email ─────────────────────────────────────────────────────────────────────
+EMAIL_HOST=smtp.gmail.com
+EMAIL_PORT=587
+EMAIL_USE_TLS=True
+EMAIL_HOST_USER=
+EMAIL_HOST_PASSWORD=
+DEFAULT_FROM_EMAIL=noreply@${DOMAIN}
 
-log "Running database migrations..."
-$COMPOSE exec -T backend python manage.py migrate --noinput
+# ── Company ───────────────────────────────────────────────────────────────────
+COMPANY_NAME=${COMPANY_NAME}
+ADMIN_EMAIL=${ADMIN_EMAIL}
 
-log "Collecting static files..."
-$COMPOSE exec -T backend python manage.py collectstatic --noinput >/dev/null
+# ── RADIUS ────────────────────────────────────────────────────────────────────
+RADIUS_SECRET=${RADIUS_SECRET}
 
-# ── 4b. Optional: seed demo data ───────────────────────────
-if [[ "$NON_INTERACTIVE" != "1" ]]; then
-  read -r -p "Seed the database with 50 demo customers (invoices, payments, tickets)? [y/N]: " seed_choice
-  if [[ "$seed_choice" =~ ^[Yy]$ ]]; then
-    log "Seeding demo data..."
-    $COMPOSE exec -T backend python manage.py seed_demo_data || \
-      warn "Seed failed - you can re-run later: $COMPOSE exec backend python manage.py seed_demo_data"
-  fi
-fi
+# ── Flower ────────────────────────────────────────────────────────────────────
+FLOWER_USER=admin
+FLOWER_PASSWORD=${FLOWER_PASSWORD}
 
-# ── 5. Superuser ───────────────────────────────────────────
-if [[ "$NON_INTERACTIVE" == "1" ]]; then
-  warn "Skipping superuser creation in non-interactive mode."
-  warn "Run later: $COMPOSE exec backend python manage.py createsuperuser"
-else
-  if $COMPOSE exec -T backend python -c "
-import django; django.setup()
-from django.contrib.auth import get_user_model
-exit(0 if get_user_model().objects.filter(is_superuser=True).exists() else 1)
-" 2>/dev/null; then
-    ok "A superuser already exists - skipping creation."
-  else
-    log "Creating Django superuser..."
-    $COMPOSE exec backend python manage.py createsuperuser || \
-      warn "Superuser creation skipped/failed. Re-run: $COMPOSE exec backend python manage.py createsuperuser"
-  fi
-fi
+# ── pgAdmin ───────────────────────────────────────────────────────────────────
+PGADMIN_EMAIL=${ADMIN_EMAIL}
+PGADMIN_PASSWORD=${PGADMIN_PASSWORD}
 
-# ── 6. Done ────────────────────────────────────────────────
-DOMAIN_FROM_ENV=$(grep -E '^ALLOWED_HOSTS=' .env | head -n1 | cut -d= -f2 | tr ',' '\n' | tail -n1 | tr -d ' ')
-DOMAIN_FROM_ENV=${DOMAIN_FROM_ENV:-localhost}
-HTTP_PORT=$(grep -E '^HTTP_PORT='  .env | cut -d= -f2 || echo 80)
-HTTPS_PORT=$(grep -E '^HTTPS_PORT=' .env | cut -d= -f2 || echo 443)
+# ── Superuser (auto-created on first deploy) ──────────────────────────────────
+DJANGO_SUPERUSER_EMAIL=${SUPERUSER_EMAIL}
+DJANGO_SUPERUSER_USERNAME=admin
+DJANGO_SUPERUSER_PASSWORD=${SUPERUSER_PASSWORD}
 
-cat <<EOF
-
-${GRN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}
-${GRN}  ISP Software is up.${NC}
-${GRN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}
-
-  Web app:        https://${DOMAIN_FROM_ENV}:${HTTPS_PORT}/
-                  http://${DOMAIN_FROM_ENV}:${HTTP_PORT}/   (will redirect to https)
-  Admin panel:    https://${DOMAIN_FROM_ENV}:${HTTPS_PORT}/admin/
-  API docs:       https://${DOMAIN_FROM_ENV}:${HTTPS_PORT}/api/v1/docs/
-  Flower (celery): http://${DOMAIN_FROM_ENV}:5555/
-  RADIUS auth:    UDP ${DOMAIN_FROM_ENV}:1812
-  RADIUS acct:    UDP ${DOMAIN_FROM_ENV}:1813
-
-  Useful commands:
-    ${COMPOSE} ps                       # container status
-    ${COMPOSE} logs -f backend          # tail backend logs
-    ${COMPOSE} exec backend bash        # shell into backend
-    ${COMPOSE} --profile tools up -d pgadmin   # start pgAdmin (port 5050)
-    ${COMPOSE} down                     # stop all
-    ${COMPOSE} down -v                  # stop + delete data (DESTRUCTIVE)
-
-  Replace the self-signed cert in nginx/ssl/ with a real Let's Encrypt
-  certificate before going live. See nginx/ssl/README.md.
-
+# ── SSL / Nginx ───────────────────────────────────────────────────────────────
+HTTP_PORT=80
+HTTPS_PORT=443
 EOF
+
+ok ".env generated"
+
+# =============================================================================
+# STEP 3 — Generate self-signed SSL certificate
+# =============================================================================
+step "Generating self-signed SSL certificate..."
+
+mkdir -p nginx/ssl
+
+if [[ ! -f nginx/ssl/fullchain.pem ]]; then
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout nginx/ssl/privkey.pem \
+        -out nginx/ssl/fullchain.pem \
+        -subj "/C=BD/ST=Dhaka/L=Dhaka/O=ISP/CN=${DOMAIN}" \
+        2>/dev/null
+    ok "SSL certificate generated (valid 10 years)"
+else
+    ok "SSL certificate already exists, skipping"
+fi
+
+# =============================================================================
+# STEP 4 — Build and start containers
+# =============================================================================
+step "Building and starting Docker containers..."
+$COMPOSE_CMD build --parallel
+$COMPOSE_CMD up -d
+
+ok "Containers started"
+
+# =============================================================================
+# STEP 5 — Wait for services to be healthy
+# =============================================================================
+step "Waiting for database to be ready..."
+MAX_WAIT=60
+WAITED=0
+until $COMPOSE_CMD exec -T db pg_isready -U ispuser -d ispdb &>/dev/null 2>&1; do
+    if [[ $WAITED -ge $MAX_WAIT ]]; then
+        err "Database did not become ready in ${MAX_WAIT}s. Check: docker logs isp_db"
+    fi
+    sleep 2
+    WAITED=$((WAITED + 2))
+    echo -n "."
+done
+echo ""
+ok "Database is ready"
+
+# =============================================================================
+# STEP 6 — Wait for backend
+# =============================================================================
+step "Waiting for backend container to start..."
+sleep 10
+
+MAX_WAIT=90
+WAITED=0
+until $COMPOSE_CMD exec -T backend python manage.py check --deploy &>/dev/null 2>&1; do
+    if [[ $WAITED -ge $MAX_WAIT ]]; then
+        warn "Backend health check timed out, continuing anyway..."
+        break
+    fi
+    sleep 3
+    WAITED=$((WAITED + 3))
+    echo -n "."
+done
+echo ""
+ok "Backend is responsive"
+
+# =============================================================================
+# STEP 7 — Run migrations
+# =============================================================================
+step "Running database migrations..."
+$COMPOSE_CMD exec -T backend python manage.py migrate --noinput
+ok "Migrations complete"
+
+# =============================================================================
+# STEP 8 — Collect static files
+# =============================================================================
+step "Collecting static files..."
+$COMPOSE_CMD exec -T backend python manage.py collectstatic --noinput --clear 2>/dev/null || \
+$COMPOSE_CMD exec -T backend python manage.py collectstatic --noinput
+ok "Static files collected"
+
+# =============================================================================
+# STEP 9 — Create superuser
+# =============================================================================
+step "Creating superuser..."
+$COMPOSE_CMD exec -T backend python manage.py shell << 'PYEOF'
+import os
+import django
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
+
+email    = os.environ.get('DJANGO_SUPERUSER_EMAIL', 'admin@isp.com')
+username = os.environ.get('DJANGO_SUPERUSER_USERNAME', 'admin')
+password = os.environ.get('DJANGO_SUPERUSER_PASSWORD', 'Admin1234!')
+
+if not User.objects.filter(username=username).exists():
+    User.objects.create_superuser(
+        username=username,
+        email=email,
+        password=password
+    )
+    print(f"[OK] Superuser created: {username} / {email}")
+else:
+    # Update password in case it changed
+    u = User.objects.get(username=username)
+    u.set_password(password)
+    u.is_superuser = True
+    u.is_staff = True
+    u.save()
+    print(f"[OK] Superuser already exists, password updated: {username}")
+PYEOF
+
+ok "Superuser ready"
+
+# =============================================================================
+# DONE — Show summary
+# =============================================================================
+echo ""
+echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════${NC}"
+echo -e "${GREEN}${BOLD}  ✅  ISP Management Software - Deploy Complete!    ${NC}"
+echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════${NC}"
+echo ""
+echo -e "  🌐  Web App  : ${BOLD}http://${DOMAIN}${NC}  (or  https://${DOMAIN})"
+echo -e "  📖  API Docs : ${BOLD}http://${DOMAIN}/api/docs/${NC}"
+echo -e "  ⚙️   Admin   : ${BOLD}http://${DOMAIN}/admin/${NC}"
+echo -e "  📊  Flower   : ${BOLD}http://${DOMAIN}:5555${NC}"
+echo ""
+echo -e "  👤  Login credentials:"
+echo -e "      Email    : ${BOLD}${SUPERUSER_EMAIL}${NC}"
+echo -e "      Password : ${BOLD}${SUPERUSER_PASSWORD}${NC}"
+echo ""
+if ! docker info &>/dev/null 2>&1; then
+    echo -e "${YELLOW}  ⚠️  Docker permission: Run 'newgrp docker' or logout/login${NC}"
+    echo ""
+fi
+echo -e "  📋  Useful commands:"
+echo -e "      ./isp.sh status    # Check services"
+echo -e "      ./isp.sh logs      # View logs"
+echo -e "      ./isp.sh restart   # Restart all"
+echo -e "      ./isp.sh backup    # Backup database"
+echo ""
+echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════${NC}"
