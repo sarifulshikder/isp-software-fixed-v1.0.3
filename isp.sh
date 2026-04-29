@@ -1,147 +1,179 @@
-#!/bin/bash
-# ═══════════════════════════════════════════════════════
-# ISP Management Software - Control Script
-# Usage: ./isp.sh [start|stop|restart|logs|status|backup|update|shell]
-# ═══════════════════════════════════════════════════════
+#!/usr/bin/env bash
+# =============================================================================
+# ISP Management Software - Management Script (Fixed v1.0.3)
+# =============================================================================
+set -euo pipefail
 
-set -e
-COMPOSE="docker compose"
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'
+BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
 
+ok()   { echo -e "${GREEN}✔${NC}  $*"; }
+info() { echo -e "${BLUE}ℹ${NC}  $*"; }
+warn() { echo -e "${YELLOW}⚠${NC}  $*"; }
+err()  { echo -e "${RED}✘${NC}  $*"; exit 1; }
+
+# ── Docker permission fix ─────────────────────────────────────────────────────
+if ! docker info &>/dev/null 2>&1; then
+    DC="sudo docker compose"
+    DK="sudo docker"
+else
+    DC="docker compose"
+    DK="docker"
+fi
+
+# ── Ensure we are in project directory ───────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+# ── Banner ────────────────────────────────────────────────────────────────────
 banner() {
-  echo -e "${BLUE}"
-  echo "  ╔═══════════════════════════════════════╗"
-  echo "  ║   📡 ISP Management Software v1.0    ║"
-  echo "  ╚═══════════════════════════════════════╝"
-  echo -e "${NC}"
+    echo -e "${BOLD}${BLUE}"
+    echo "  ╔══════════════════════════════════════╗"
+    echo "  ║   ISP Management Software v1.0.3    ║"
+    echo "  ╚══════════════════════════════════════╝"
+    echo -e "${NC}"
 }
 
-check_env() {
-  if [ ! -f .env ]; then
-    echo -e "${YELLOW}⚠  .env file not found. Copying from .env.example...${NC}"
-    cp .env.example .env
-    echo -e "${RED}⚠  Please edit .env with your settings before starting!${NC}"
-    exit 1
-  fi
-}
+# =============================================================================
+CMD="${1:-help}"
+shift || true
 
-cmd_start() {
-  banner
-  check_env
-  echo -e "${GREEN}▶ Starting ISP Management Software...${NC}"
-  $COMPOSE up -d --build
-  echo ""
-  echo -e "${GREEN}✅ All services started!${NC}"
-  echo ""
-  echo -e "  🌐 Web App:      ${BLUE}http://localhost${NC}"
-  echo -e "  📚 API Docs:     ${BLUE}http://localhost/api/docs/${NC}"
-  echo -e "  🔧 Admin:        ${BLUE}http://localhost/admin/${NC}"
-  echo -e "  🌸 Flower:       ${BLUE}http://localhost:5555${NC}"
-  echo ""
-}
+case "$CMD" in
 
-cmd_stop() {
-  echo -e "${YELLOW}⏹ Stopping all services...${NC}"
-  $COMPOSE down
-  echo -e "${GREEN}✅ All services stopped.${NC}"
-}
+# ── start ─────────────────────────────────────────────────────────────────────
+start)
+    banner
+    info "Starting ISP Management Software..."
+    $DC up -d
+    ok "All services started"
+    echo ""
+    $DC ps
+    ;;
 
-cmd_restart() {
-  cmd_stop
-  sleep 2
-  cmd_start
-}
+# ── stop ──────────────────────────────────────────────────────────────────────
+stop)
+    info "Stopping all services..."
+    $DC stop
+    ok "All services stopped"
+    ;;
 
-cmd_logs() {
-  SERVICE=${2:-""}
-  $COMPOSE logs -f --tail=100 $SERVICE
-}
+# ── restart ───────────────────────────────────────────────────────────────────
+restart)
+    info "Restarting all services..."
+    $DC restart
+    ok "All services restarted"
+    ;;
 
-cmd_status() {
-  echo -e "${BLUE}📊 Service Status:${NC}"
-  $COMPOSE ps
-}
+# ── status ────────────────────────────────────────────────────────────────────
+status)
+    banner
+    echo -e "${BOLD}Service Status:${NC}"
+    $DC ps
+    ;;
 
-cmd_backup() {
-  DATE=$(date +%Y%m%d_%H%M%S)
-  BACKUP_DIR="backups/$DATE"
-  mkdir -p $BACKUP_DIR
-  echo -e "${GREEN}💾 Creating database backup...${NC}"
-  $COMPOSE exec -T db pg_dump -U ispuser ispdb > $BACKUP_DIR/database.sql
-  echo -e "${GREEN}✅ Backup saved to $BACKUP_DIR/database.sql${NC}"
-}
+# ── logs ──────────────────────────────────────────────────────────────────────
+logs)
+    SERVICE="${1:-}"
+    if [[ -n "$SERVICE" ]]; then
+        $DC logs -f "$SERVICE"
+    else
+        $DC logs -f --tail=100
+    fi
+    ;;
 
-cmd_restore() {
-  BACKUP_FILE=$2
-  if [ -z "$BACKUP_FILE" ]; then
-    echo -e "${RED}❌ Usage: ./isp.sh restore <backup_file.sql>${NC}"
-    exit 1
-  fi
-  echo -e "${YELLOW}⚠  Restoring database from $BACKUP_FILE...${NC}"
-  $COMPOSE exec -T db psql -U ispuser ispdb < $BACKUP_FILE
-  echo -e "${GREEN}✅ Database restored.${NC}"
-}
+# ── backup ────────────────────────────────────────────────────────────────────
+backup)
+    BACKUP_FILE="backup_$(date +%Y%m%d_%H%M%S).sql"
+    info "Creating database backup: $BACKUP_FILE"
+    $DC exec -T db pg_dump -U ispuser ispdb > "$BACKUP_FILE"
+    ok "Backup saved: $BACKUP_FILE"
+    ;;
 
-cmd_shell() {
-  SERVICE=${2:-"backend"}
-  echo -e "${GREEN}🐚 Opening shell in $SERVICE container...${NC}"
-  $COMPOSE exec $SERVICE sh
-}
+# ── restore ───────────────────────────────────────────────────────────────────
+restore)
+    FILE="${1:-}"
+    [[ -z "$FILE" ]] && err "Usage: ./isp.sh restore <backup.sql>"
+    [[ ! -f "$FILE" ]] && err "File not found: $FILE"
+    warn "This will OVERWRITE the current database. Continue? (yes/no)"
+    read -r CONFIRM
+    [[ "$CONFIRM" != "yes" ]] && { info "Cancelled."; exit 0; }
+    info "Restoring from $FILE..."
+    $DC exec -T db psql -U ispuser -d ispdb < "$FILE"
+    ok "Database restored"
+    ;;
 
-cmd_django() {
-  $COMPOSE exec backend python manage.py ${@:2}
-}
+# ── shell ─────────────────────────────────────────────────────────────────────
+shell)
+    SERVICE="${1:-backend}"
+    info "Opening shell in $SERVICE container..."
+    $DC exec "$SERVICE" /bin/sh
+    ;;
 
-cmd_createsuperuser() {
-  $COMPOSE exec backend python manage.py createsuperuser
-}
+# ── django ────────────────────────────────────────────────────────────────────
+django)
+    $DC exec backend python manage.py "$@"
+    ;;
 
-cmd_update() {
-  echo -e "${GREEN}🔄 Updating ISP Software...${NC}"
-  git pull
-  $COMPOSE build --no-cache
-  $COMPOSE up -d
-  $COMPOSE exec backend python manage.py migrate
-  $COMPOSE exec backend python manage.py collectstatic --noinput
-  echo -e "${GREEN}✅ Update complete!${NC}"
-}
+# ── createsuperuser ───────────────────────────────────────────────────────────
+createsuperuser)
+    info "Creating superuser..."
+    read -rp "Email [admin@isp.com]: " SU_EMAIL
+    SU_EMAIL="${SU_EMAIL:-admin@isp.com}"
+    read -rsp "Password: " SU_PASS
+    echo ""
 
-cmd_help() {
-  banner
-  echo "Usage: ./isp.sh <command>"
-  echo ""
-  echo "Commands:"
-  echo "  start              Start all services"
-  echo "  stop               Stop all services"
-  echo "  restart            Restart all services"
-  echo "  status             Show service status"
-  echo "  logs [service]     View logs (optional: backend/nginx/db/redis/celery)"
-  echo "  backup             Backup database"
-  echo "  restore <file>     Restore database from backup"
-  echo "  shell [service]    Open shell in container"
-  echo "  django <cmd>       Run Django management command"
-  echo "  createsuperuser    Create admin user"
-  echo "  update             Pull latest and update"
-  echo ""
-}
+    $DC exec -T backend python manage.py shell << PYEOF
+from django.contrib.auth import get_user_model
+User = get_user_model()
+email = "${SU_EMAIL}"
+password = "${SU_PASS}"
+username = email.split('@')[0]
+if not User.objects.filter(email=email).exists():
+    User.objects.create_superuser(username=username, email=email, password=password)
+    print(f"[OK] Superuser created: {email}")
+else:
+    u = User.objects.get(email=email)
+    u.set_password(password)
+    u.save()
+    print(f"[OK] Password updated for: {email}")
+PYEOF
+    ok "Done"
+    ;;
 
-# Main
-case "$1" in
-  start)            cmd_start ;;
-  stop)             cmd_stop ;;
-  restart)          cmd_restart ;;
-  logs)             cmd_logs "$@" ;;
-  status)           cmd_status ;;
-  backup)           cmd_backup ;;
-  restore)          cmd_restore "$@" ;;
-  shell)            cmd_shell "$@" ;;
-  django)           cmd_django "$@" ;;
-  createsuperuser)  cmd_createsuperuser ;;
-  update)           cmd_update ;;
-  help|--help|-h)   cmd_help ;;
-  *)                cmd_help ;;
+# ── update ────────────────────────────────────────────────────────────────────
+update)
+    info "Pulling latest changes..."
+    git pull
+    info "Rebuilding containers..."
+    $DC build --parallel
+    $DC up -d
+    $DC exec -T backend python manage.py migrate --noinput
+    $DC exec -T backend python manage.py collectstatic --noinput
+    ok "Update complete"
+    ;;
+
+# ── help ──────────────────────────────────────────────────────────────────────
+help|*)
+    banner
+    echo -e "${BOLD}Usage:${NC} ./isp.sh <command> [options]"
+    echo ""
+    echo -e "${BOLD}Commands:${NC}"
+    echo "  start              Start all services"
+    echo "  stop               Stop all services"
+    echo "  restart            Restart all services"
+    echo "  status             Show service status"
+    echo "  logs [service]     View logs (all or specific service)"
+    echo "  backup             Backup database"
+    echo "  restore <file>     Restore database from backup"
+    echo "  shell [service]    Open shell in container (default: backend)"
+    echo "  django <cmd>       Run Django management command"
+    echo "  createsuperuser    Create admin user interactively"
+    echo "  update             Pull latest code and restart"
+    echo ""
+    echo -e "${BOLD}Examples:${NC}"
+    echo "  ./isp.sh logs backend"
+    echo "  ./isp.sh django migrate"
+    echo "  ./isp.sh backup"
+    ;;
+
 esac
